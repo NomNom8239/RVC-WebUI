@@ -268,16 +268,26 @@ def update_dropdown_speaker_index(model_name, dropdown_value):
     return update_speaker_index(model_name, 0, dropdown_value)
 
 
-def vc_single_with_speaker(slider_value, dropdown_value, *args):
-    args = list(args)
-    if args:
-        input_audio = args[0]
+def vc_single_with_speaker(
+    slider_value,
+    dropdown_value,
+    uploaded_audio,
+    local_audio_path,
+    *args,
+):
+    input_audio = str(local_audio_path or "").strip().strip('"')
+    if input_audio:
+        if not os.path.isfile(input_audio):
+            message = "入力音声ファイルが見つかりません: %s" % input_audio
+            return inference_status("单次推理", "失败", message), None, None
+    else:
+        input_audio = uploaded_audio
         if input_audio is not None and not isinstance(input_audio, str):
             input_audio = input_audio.name
-        args[0] = input_audio
 
     info, output = vc.vc_single_auto(
         selected_speaker_id(slider_value, dropdown_value),
+        input_audio,
         *args,
     )
     if isinstance(output, str) and os.path.isfile(output):
@@ -1892,11 +1902,16 @@ with gr.Blocks(title="RVC WebUI", css=TRAINING_INFO_CSS) as app:
                                         interactive=True,
                                     )
                             input_audio0 = gr.File(
-                                label=(
-                                    "推論入力ファイル "
-                                    "（長尺対応・ブラウザで音声を展開しません）"
-                                ),
+                                label="短尺入力ファイル（アップロード）",
                                 type="file",
+                                interactive=True,
+                            )
+                            input_audio_path0 = gr.Textbox(
+                                label=(
+                                    "長尺入力のローカルファイルパス "
+                                    "（こちらを優先・ブラウザへアップロードしません）"
+                                ),
+                                placeholder=r"F:\path\to\long_audio.wav",
                                 interactive=True,
                             )
 
@@ -1971,6 +1986,7 @@ with gr.Blocks(title="RVC WebUI", css=TRAINING_INFO_CSS) as app:
                                 spk_item,
                                 spk_item_dropdown,
                                 input_audio0,
+                                input_audio_path0,
                                 vc_transform0,
                                 f0method0,
                                 file_index1,
