@@ -269,7 +269,10 @@ def update_dropdown_speaker_index(model_name, dropdown_value):
 
 
 def vc_single_with_speaker(slider_value, dropdown_value, *args):
-    return vc.vc_single(selected_speaker_id(slider_value, dropdown_value), *args)
+    return vc.vc_single_auto(
+        selected_speaker_id(slider_value, dropdown_value),
+        *args,
+    )
 
 
 def vc_multi_with_speaker(slider_value, dropdown_value, *args):
