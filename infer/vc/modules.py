@@ -1,14 +1,17 @@
-import traceback
 import logging
+import os
+import tempfile
+import traceback
+from io import BytesIO
 
-logger = logging.getLogger(__name__)
-
+import ffmpeg
 import numpy as np
 import soundfile as sf
 import torch
-from io import BytesIO
 
-from infer.audio import load_audio, wav2
+logger = logging.getLogger(__name__)
+
+from infer.audio import clean_path, load_audio, wav2
 from infer.module.models import (
     SynthesizerTrnMs256NSFsid,
     SynthesizerTrnMs256NSFsid_nono,
@@ -23,6 +26,79 @@ from tools.cuda_graph import clear_cuda_graph_cache
 
 
 i18n = I18nAuto()
+
+LONG_AUDIO_THRESHOLD_SECONDS = 120.0
+LONG_AUDIO_CHUNK_SECONDS = 60.0
+LONG_AUDIO_OVERLAP_SECONDS = 1.0
+LONG_AUDIO_MIN_TAIL_SECONDS = 5.0
+
+
+def _probe_audio_duration(path):
+    info = ffmpeg.probe(clean_path(os.fspath(path)), cmd="ffprobe")
+    stream = next(
+        item for item in info.get("streams", [])
+        if item.get("codec_type") == "audio"
+    )
+
+    for container in (stream, info.get("format", {})):
+        value = container.get("duration")
+        if value not in (None, "", "N/A"):
+            duration = float(value)
+            if duration > 0:
+                return duration
+
+    duration_ts = stream.get("duration_ts")
+    time_base = stream.get("time_base")
+    if duration_ts not in (None, "", "N/A") and time_base:
+        numerator, denominator = (int(part) for part in time_base.split("/", 1))
+        if denominator:
+            duration = float(duration_ts) * numerator / denominator
+            if duration > 0:
+                return duration
+
+    raise RuntimeError("Could not determine audio duration.")
+
+
+def _load_audio_segment(path, start_seconds, duration_seconds, sample_rate=16000):
+    input_stream = ffmpeg.input(
+        clean_path(os.fspath(path)),
+        ss=max(0.0, float(start_seconds)),
+    )
+    out, _ = (
+        input_stream.output(
+            "-",
+            format="f32le",
+            acodec="pcm_f32le",
+            ac=1,
+            ar=int(sample_rate),
+            t=max(0.0, float(duration_seconds)),
+        )
+        .run(
+            cmd=["ffmpeg", "-nostdin"],
+            capture_stdout=True,
+            capture_stderr=True,
+        )
+    )
+    return np.frombuffer(out, np.float32).copy()
+
+
+def _long_audio_ranges(total_seconds):
+    ranges = []
+    start = 0.0
+    total_seconds = float(total_seconds)
+
+    while start < total_seconds:
+        end = min(start + LONG_AUDIO_CHUNK_SECONDS, total_seconds)
+        remaining = total_seconds - end
+        if 0 < remaining < LONG_AUDIO_MIN_TAIL_SECONDS:
+            end = total_seconds
+
+        ranges.append((start, end))
+        if end >= total_seconds:
+            break
+        start = max(0.0, end - LONG_AUDIO_OVERLAP_SECONDS)
+
+    return ranges
 
 
 def inference_status(title, state, detail=""):
@@ -223,6 +299,75 @@ class VC:
             else speaker_slider_update
         )
 
+    def _normalize_index_path(self, file_index):
+        if not file_index:
+            return ""
+        return (
+            str(file_index)
+            .strip(" ")
+            .strip('"')
+            .strip("\n")
+            .strip('"')
+            .strip(" ")
+            .replace("trained", "added")
+        )
+
+    def _run_single_audio(
+        self,
+        sid,
+        audio,
+        f0_up_key,
+        f0_method,
+        file_index,
+        index_rate,
+        resample_sr,
+        rms_mix_rate,
+        protect,
+    ):
+        audio = np.asarray(audio, dtype=np.float32)
+        if audio.size == 0:
+            raise ValueError("Input audio is empty.")
+
+        audio_max = np.abs(audio).max() / 0.95
+        if audio_max > 1:
+            audio = audio / audio_max
+
+        if self.hubert_model is None:
+            self.hubert_model = load_hubert(self.config)
+
+        file_index = self._normalize_index_path(file_index)
+        times = [0.0, 0.0, 0.0]
+        audio_opt = self.pipeline.pipeline(
+            self.hubert_model,
+            self.net_g,
+            sid,
+            audio,
+            times,
+            int(f0_up_key),
+            f0_method,
+            file_index,
+            index_rate,
+            self.if_f0,
+            self.tgt_sr,
+            resample_sr,
+            rms_mix_rate,
+            self.version,
+            protect,
+        )
+        tgt_sr = (
+            resample_sr
+            if self.tgt_sr != resample_sr >= 16000
+            else self.tgt_sr
+        )
+        return tgt_sr, audio_opt, times, file_index
+
+    def _index_info(self, file_index):
+        return (
+            "%s：%s" % (i18n("索引"), file_index)
+            if file_index and os.path.exists(file_index)
+            else "%s：%s" % (i18n("索引"), i18n("未使用"))
+        )
+
     def vc_single(
         self,
         sid,
@@ -237,54 +382,18 @@ class VC:
     ):
         if input_audio_path is None:
             return inference_status("单次推理", "等待输入", i18n("请上传音频文件")), None
-        f0_up_key = int(f0_up_key)
         try:
             audio = load_audio(input_audio_path, 16000)
-            audio_max = np.abs(audio).max() / 0.95
-            if audio_max > 1:
-                audio /= audio_max
-            times = [0, 0, 0]
-
-            if self.hubert_model is None:
-                self.hubert_model = load_hubert(self.config)
-
-            if file_index:
-                file_index = (
-                    file_index.strip(" ")
-                    .strip('"')
-                    .strip("\n")
-                    .strip('"')
-                    .strip(" ")
-                    .replace("trained", "added")
-                )
-            else:
-                file_index = ""  # 防止小白写错，自动帮他替换掉
-
-            audio_opt = self.pipeline.pipeline(
-                self.hubert_model,
-                self.net_g,
+            tgt_sr, audio_opt, times, file_index = self._run_single_audio(
                 sid,
                 audio,
-                times,
                 f0_up_key,
                 f0_method,
                 file_index,
                 index_rate,
-                self.if_f0,
-                self.tgt_sr,
                 resample_sr,
                 rms_mix_rate,
-                self.version,
                 protect,
-            )
-            if self.tgt_sr != resample_sr >= 16000:
-                tgt_sr = resample_sr
-            else:
-                tgt_sr = self.tgt_sr
-            index_info = (
-                "%s：%s" % (i18n("索引"), file_index)
-                if os.path.exists(file_index)
-                else "%s：%s" % (i18n("索引"), i18n("未使用"))
             )
             return (
                 inference_status(
@@ -292,7 +401,7 @@ class VC:
                     "成功",
                     "%s\n%s：%s %.2fs | F0 %.2fs | %s %.2fs"
                     % (
-                        index_info,
+                        self._index_info(file_index),
                         i18n("耗时"),
                         i18n("特征"),
                         times[0],
@@ -307,6 +416,233 @@ class VC:
             info = traceback.format_exc()
             logger.warning(info)
             return inference_status("单次推理", "失败", info), (None, None)
+
+    def vc_single_chunked(
+        self,
+        sid,
+        input_audio_path,
+        f0_up_key,
+        f0_method,
+        file_index,
+        index_rate,
+        resample_sr,
+        rms_mix_rate,
+        protect,
+        duration_seconds=None,
+    ):
+        if input_audio_path is None:
+            return inference_status("单次推理", "等待输入", i18n("请上传音频文件")), None
+
+        output_path = None
+        try:
+            if duration_seconds is None:
+                duration_seconds = _probe_audio_duration(input_audio_path)
+
+            ranges = _long_audio_ranges(duration_seconds)
+            if not ranges:
+                raise RuntimeError("No long-audio chunks were generated.")
+
+            total_times = [0.0, 0.0, 0.0]
+            output_parts = []
+            pending = None
+            tgt_sr = None
+            normalized_index = self._normalize_index_path(file_index)
+
+            logger.info(
+                "Long audio inference: %.2fs, %d chunks (%.1fs, %.1fs overlap)",
+                duration_seconds,
+                len(ranges),
+                LONG_AUDIO_CHUNK_SECONDS,
+                LONG_AUDIO_OVERLAP_SECONDS,
+            )
+
+            for chunk_index, (start, end) in enumerate(ranges, start=1):
+                logger.info(
+                    "Long audio chunk %d/%d: %.2f-%.2fs",
+                    chunk_index,
+                    len(ranges),
+                    start,
+                    end,
+                )
+                audio = _load_audio_segment(
+                    input_audio_path,
+                    start,
+                    end - start,
+                    sample_rate=16000,
+                )
+                chunk_sr, audio_opt, times, normalized_index = self._run_single_audio(
+                    sid,
+                    audio,
+                    f0_up_key,
+                    f0_method,
+                    normalized_index,
+                    index_rate,
+                    resample_sr,
+                    rms_mix_rate,
+                    protect,
+                )
+                del audio
+
+                if tgt_sr is None:
+                    tgt_sr = int(chunk_sr)
+                elif int(chunk_sr) != tgt_sr:
+                    raise RuntimeError(
+                        "Long-audio chunk sample rate changed unexpectedly."
+                    )
+
+                for index in range(3):
+                    total_times[index] += float(times[index])
+
+                current = np.asarray(audio_opt, dtype=np.float32)
+                del audio_opt
+
+                if pending is None:
+                    pending = current
+                    continue
+
+                overlap_samples = min(
+                    int(round(LONG_AUDIO_OVERLAP_SECONDS * tgt_sr)),
+                    len(pending),
+                    len(current),
+                )
+                if overlap_samples <= 0:
+                    output_parts.append(pending)
+                    pending = current
+                    continue
+
+                fade_in = np.linspace(
+                    0.0,
+                    1.0,
+                    overlap_samples,
+                    endpoint=True,
+                    dtype=np.float32,
+                )
+                fade_out = 1.0 - fade_in
+                crossfade = (
+                    pending[-overlap_samples:] * fade_out
+                    + current[:overlap_samples] * fade_in
+                )
+                if len(pending) > overlap_samples:
+                    output_parts.append(pending[:-overlap_samples])
+                output_parts.append(crossfade)
+                pending = current[overlap_samples:]
+
+            if pending is not None:
+                output_parts.append(pending)
+            if not output_parts or tgt_sr is None:
+                raise RuntimeError("Long-audio inference produced no output.")
+
+            combined = np.concatenate(output_parts)
+            combined = np.clip(
+                np.rint(combined),
+                -32768,
+                32767,
+            ).astype(np.int16)
+
+            fd, output_path = tempfile.mkstemp(
+                prefix="rvc_long_",
+                suffix=".wav",
+            )
+            os.close(fd)
+            sf.write(
+                output_path,
+                combined,
+                tgt_sr,
+                subtype="PCM_16",
+            )
+            del combined, output_parts, pending
+
+            detail = (
+                "%s\n"
+                "Long audio: %.1fs / %d chunks (%.0fs each, %.1fs overlap)\n"
+                "%s：%s %.2fs | F0 %.2fs | %s %.2fs"
+                % (
+                    self._index_info(normalized_index),
+                    duration_seconds,
+                    len(ranges),
+                    LONG_AUDIO_CHUNK_SECONDS,
+                    LONG_AUDIO_OVERLAP_SECONDS,
+                    i18n("耗时"),
+                    i18n("特征"),
+                    total_times[0],
+                    total_times[1],
+                    i18n("合成"),
+                    total_times[2],
+                )
+            )
+            return (
+                inference_status("单次推理", "成功", detail),
+                output_path,
+            )
+        except Exception:
+            if output_path and os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    pass
+            info = traceback.format_exc()
+            logger.warning(info)
+            return inference_status("单次推理", "失败", info), None
+
+    def vc_single_auto(
+        self,
+        sid,
+        input_audio_path,
+        f0_up_key,
+        f0_method,
+        file_index,
+        index_rate,
+        resample_sr,
+        rms_mix_rate,
+        protect,
+    ):
+        if input_audio_path is None:
+            return inference_status("单次推理", "等待输入", i18n("请上传音频文件")), None
+
+        try:
+            duration_seconds = _probe_audio_duration(input_audio_path)
+        except Exception:
+            logger.warning(
+                "Could not probe input duration; falling back to normal inference.\n%s",
+                traceback.format_exc(),
+            )
+            return self.vc_single(
+                sid,
+                input_audio_path,
+                f0_up_key,
+                f0_method,
+                file_index,
+                index_rate,
+                resample_sr,
+                rms_mix_rate,
+                protect,
+            )
+
+        if duration_seconds <= LONG_AUDIO_THRESHOLD_SECONDS:
+            return self.vc_single(
+                sid,
+                input_audio_path,
+                f0_up_key,
+                f0_method,
+                file_index,
+                index_rate,
+                resample_sr,
+                rms_mix_rate,
+                protect,
+            )
+
+        return self.vc_single_chunked(
+            sid,
+            input_audio_path,
+            f0_up_key,
+            f0_method,
+            file_index,
+            index_rate,
+            resample_sr,
+            rms_mix_rate,
+            protect,
+            duration_seconds=duration_seconds,
+        )
 
     def vc_multi(
         self,
