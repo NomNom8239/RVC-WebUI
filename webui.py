@@ -269,10 +269,13 @@ def update_dropdown_speaker_index(model_name, dropdown_value):
 
 
 def vc_single_with_speaker(slider_value, dropdown_value, *args):
-    return vc.vc_single_auto(
+    info, output = vc.vc_single_auto(
         selected_speaker_id(slider_value, dropdown_value),
         *args,
     )
+    if isinstance(output, str) and os.path.isfile(output):
+        return info, None, output
+    return info, output, None
 
 
 def vc_multi_with_speaker(slider_value, dropdown_value, *args):
@@ -1942,6 +1945,9 @@ with gr.Blocks(title="RVC WebUI", css=TRAINING_INFO_CSS) as app:
                             vc_output2 = gr.Audio(
                                 label=i18n("输出音频(右下角三个点,点了可以下载)")
                             )
+                            vc_output3 = gr.File(
+                                label="長尺出力ファイル（長尺入力時はこちら）"
+                            )
 
                         but0.click(
                             report_missing_index,
@@ -1964,7 +1970,7 @@ with gr.Blocks(title="RVC WebUI", css=TRAINING_INFO_CSS) as app:
                                 rms_mix_rate0,
                                 protect0,
                             ],
-                            [vc_output1, vc_output2],
+                            [vc_output1, vc_output2, vc_output3],
                             api_name="infer_convert",
                         )
             with gr.TabItem(i18n("批量推理")):
