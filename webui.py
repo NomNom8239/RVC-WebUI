@@ -1884,9 +1884,11 @@ with gr.Blocks(title="RVC WebUI", css=TRAINING_INFO_CSS) as app:
                                         value="rmvpe",
                                         interactive=True,
                                     )
-                            input_audio0 = gr.Audio(
-                                label=i18n("拖拽或点击上传待处理音频"),
-                                source="upload",
+                            input_audio0 = gr.File(
+                                label=(
+                                    "推論入力ファイル "
+                                    "（長尺対応・ブラウザで音声を展開しません）"
+                                ),
                                 type="filepath",
                                 interactive=True,
                             )
