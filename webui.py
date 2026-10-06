@@ -269,6 +269,13 @@ def update_dropdown_speaker_index(model_name, dropdown_value):
 
 
 def vc_single_with_speaker(slider_value, dropdown_value, *args):
+    args = list(args)
+    if args:
+        input_audio = args[0]
+        if input_audio is not None and not isinstance(input_audio, str):
+            input_audio = input_audio.name
+        args[0] = input_audio
+
     info, output = vc.vc_single_auto(
         selected_speaker_id(slider_value, dropdown_value),
         *args,
@@ -1889,7 +1896,7 @@ with gr.Blocks(title="RVC WebUI", css=TRAINING_INFO_CSS) as app:
                                     "推論入力ファイル "
                                     "（長尺対応・ブラウザで音声を展開しません）"
                                 ),
-                                type="filepath",
+                                type="file",
                                 interactive=True,
                             )
 
