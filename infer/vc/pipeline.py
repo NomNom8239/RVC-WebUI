@@ -255,7 +255,6 @@ class Pipeline(object):
         audio0,
         pitch,
         pitchf,
-        voiced_mask,
         times,
         index,
         index_vectors,
@@ -282,7 +281,7 @@ class Pipeline(object):
                 version,
                 padding_mask=padding_mask,
             )
-        if protect < 0.5 and voiced_mask is not None:
+        if protect < 0.5 and pitch is not None and pitchf is not None:
             feats0 = feats.clone()
         if (
             not isinstance(index, type(None))
@@ -306,7 +305,7 @@ class Pipeline(object):
             )
 
         feats = F.interpolate(feats.permute(0, 2, 1), scale_factor=2).permute(0, 2, 1)
-        if protect < 0.5 and voiced_mask is not None:
+        if protect < 0.5 and pitch is not None and pitchf is not None:
             feats0 = F.interpolate(feats0.permute(0, 2, 1), scale_factor=2).permute(
                 0, 2, 1
             )
@@ -317,15 +316,13 @@ class Pipeline(object):
             if pitch is not None and pitchf is not None:
                 pitch = pitch[:, :p_len]
                 pitchf = pitchf[:, :p_len]
-            if voiced_mask is not None:
-                voiced_mask = voiced_mask[:, :p_len]
 
-        if protect < 0.5 and voiced_mask is not None:
-            protect_mask = voiced_mask.clone()
-            protect_mask[voiced_mask >= 0.5] = 1.0
-            protect_mask[voiced_mask < 0.5] = protect
-            protect_mask = protect_mask.unsqueeze(-1)
-            feats = feats * protect_mask + feats0 * (1 - protect_mask)
+        if protect < 0.5 and pitch is not None and pitchf is not None:
+            pitchff = pitchf.clone()
+            pitchff[pitchf > 0] = 1
+            pitchff[pitchf < 1] = protect
+            pitchff = pitchff.unsqueeze(-1)
+            feats = feats * pitchff + feats0 * (1 - pitchff)
             feats = feats.to(feats0.dtype)
         p_len = torch.tensor([p_len], device=self.device).long()
         with torch.no_grad():
@@ -423,7 +420,6 @@ class Pipeline(object):
         sid = torch.tensor(sid, device=self.device).unsqueeze(0).long()
         pitch, pitchf = None, None
         voiced_mask_np = None
-        voiced_mask = None
         if if_f0 == 1:
             pitch, pitchf, voiced_mask_np = self.get_f0(
                 audio_pad,
@@ -436,11 +432,6 @@ class Pipeline(object):
             voiced_mask_np = voiced_mask_np[:p_len].astype(np.float32)
             pitch = torch.tensor(pitch, device=self.device).unsqueeze(0).long()
             pitchf = torch.tensor(pitchf, device=self.device).unsqueeze(0).float()
-            voiced_mask = (
-                torch.tensor(voiced_mask_np, device=self.device)
-                .unsqueeze(0)
-                .float()
-            )
         t2 = ttime()
         times[1] += t2 - t1
         for t in opt_ts:
@@ -454,9 +445,6 @@ class Pipeline(object):
                         audio_pad[s : t + self.t_pad2 + self.window],
                         pitch[:, s // self.window : (t + self.t_pad2) // self.window],
                         pitchf[:, s // self.window : (t + self.t_pad2) // self.window],
-                        voiced_mask[
-                            :, s // self.window : (t + self.t_pad2) // self.window
-                        ],
                         times,
                         index,
                         index_vectors,
@@ -472,7 +460,6 @@ class Pipeline(object):
                         net_g,
                         sid,
                         audio_pad[s : t + self.t_pad2 + self.window],
-                        None,
                         None,
                         None,
                         times,
@@ -493,11 +480,6 @@ class Pipeline(object):
                     audio_pad[t:],
                     pitch[:, t // self.window :] if t is not None else pitch,
                     pitchf[:, t // self.window :] if t is not None else pitchf,
-                    (
-                        voiced_mask[:, t // self.window :]
-                        if t is not None
-                        else voiced_mask
-                    ),
                     times,
                     index,
                     index_vectors,
@@ -513,7 +495,6 @@ class Pipeline(object):
                     net_g,
                     sid,
                     audio_pad[t:],
-                    None,
                     None,
                     None,
                     times,
@@ -566,7 +547,7 @@ class Pipeline(object):
         if audio_max > 1:
             max_int16 /= audio_max
         audio_opt = (audio_opt * max_int16).astype(np.int16)
-        del pitch, pitchf, voiced_mask, sid
+        del pitch, pitchf, sid
         if torch.cuda.is_available() and not cuda_graph_enabled(self.device):
             torch.cuda.empty_cache()
         return audio_opt
