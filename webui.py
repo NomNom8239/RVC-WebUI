@@ -2104,6 +2104,25 @@ with gr.Blocks(title="RVC WebUI", css=TRAINING_INFO_CSS) as app:
                                 step=0.05,
                                 interactive=True,
                             )
+                            breath_denoise0 = gr.Checkbox(
+                                label=(
+                                    "Breath denoise "
+                                    "（Breath-safeで戻す元音声だけ軽くノイズ除去）"
+                                ),
+                                value=False,
+                                interactive=True,
+                            )
+                            breath_denoise_strength0 = gr.Slider(
+                                minimum=0,
+                                maximum=1,
+                                label=(
+                                    "Breath denoise strength "
+                                    "（上げるほど定常/機械ノイズを強く抑制）"
+                                ),
+                                value=0.35,
+                                step=0.05,
+                                interactive=True,
+                            )
                             index_rate1 = gr.Slider(
                                 minimum=0,
                                 maximum=1,
@@ -2157,6 +2176,8 @@ with gr.Blocks(title="RVC WebUI", css=TRAINING_INFO_CSS) as app:
                                 protect0,
                                 breath_safe0,
                                 breath_preserve0,
+                                breath_denoise0,
+                                breath_denoise_strength0,
                             ],
                             [vc_output1, vc_output2, vc_output3],
                             api_name="infer_convert",
@@ -2241,6 +2262,25 @@ with gr.Blocks(title="RVC WebUI", css=TRAINING_INFO_CSS) as app:
                             step=0.05,
                             interactive=True,
                         )
+                        breath_denoise1 = gr.Checkbox(
+                            label=(
+                                "Breath denoise "
+                                "（Breath-safeで戻す元音声だけ軽くノイズ除去）"
+                            ),
+                            value=False,
+                            interactive=True,
+                        )
+                        breath_denoise_strength1 = gr.Slider(
+                            minimum=0,
+                            maximum=1,
+                            label=(
+                                "Breath denoise strength "
+                                "（上げるほど定常/機械ノイズを強く抑制）"
+                            ),
+                            value=0.35,
+                            step=0.05,
+                            interactive=True,
+                        )
                         index_rate2 = gr.Slider(
                             minimum=0,
                             maximum=1,
@@ -2289,6 +2329,8 @@ with gr.Blocks(title="RVC WebUI", css=TRAINING_INFO_CSS) as app:
                             format1,
                             breath_safe1,
                             breath_preserve1,
+                            breath_denoise1,
+                            breath_denoise_strength1,
                         ],
                         [vc_output3],
                         api_name="infer_convert_batch",
