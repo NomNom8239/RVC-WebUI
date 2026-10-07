@@ -344,6 +344,8 @@ class VC:
         protect,
         breath_safe=False,
         breath_preserve=0.8,
+        breath_denoise=False,
+        breath_denoise_strength=0.35,
     ):
         audio = np.asarray(audio, dtype=np.float32)
         if audio.size == 0:
@@ -376,6 +378,8 @@ class VC:
             protect,
             breath_safe,
             breath_preserve,
+            breath_denoise,
+            breath_denoise_strength,
         )
         tgt_sr = (
             resample_sr
@@ -404,6 +408,8 @@ class VC:
         protect,
         breath_safe=False,
         breath_preserve=0.8,
+        breath_denoise=False,
+        breath_denoise_strength=0.35,
     ):
         if input_audio_path is None:
             return inference_status("单次推理", "等待输入", i18n("请上传音频文件")), None
@@ -421,6 +427,8 @@ class VC:
                 protect,
                 breath_safe,
                 breath_preserve,
+                breath_denoise,
+                breath_denoise_strength,
             )
             return (
                 inference_status(
@@ -457,6 +465,8 @@ class VC:
         protect,
         breath_safe=False,
         breath_preserve=0.8,
+        breath_denoise=False,
+        breath_denoise_strength=0.35,
         duration_seconds=None,
     ):
         if input_audio_path is None:
@@ -511,6 +521,8 @@ class VC:
                     protect,
                     breath_safe,
                     breath_preserve,
+                    breath_denoise,
+                    breath_denoise_strength,
                 )
                 del audio
 
@@ -628,6 +640,8 @@ class VC:
         protect,
         breath_safe=False,
         breath_preserve=0.8,
+        breath_denoise=False,
+        breath_denoise_strength=0.35,
     ):
         if input_audio_path is None:
             return inference_status("单次推理", "等待输入", i18n("请上传音频文件")), None
@@ -651,6 +665,8 @@ class VC:
                 protect,
                 breath_safe,
                 breath_preserve,
+                breath_denoise,
+                breath_denoise_strength,
             )
 
         if duration_seconds <= LONG_AUDIO_THRESHOLD_SECONDS:
@@ -666,6 +682,8 @@ class VC:
                 protect,
                 breath_safe,
                 breath_preserve,
+                breath_denoise,
+                breath_denoise_strength,
             )
 
         return self.vc_single_chunked(
@@ -680,6 +698,8 @@ class VC:
             protect,
             breath_safe,
             breath_preserve,
+            breath_denoise,
+            breath_denoise_strength,
             duration_seconds=duration_seconds,
         )
 
@@ -699,6 +719,8 @@ class VC:
         format1,
         breath_safe=False,
         breath_preserve=0.8,
+        breath_denoise=False,
+        breath_denoise_strength=0.35,
     ):
         try:
             dir_path = (
@@ -756,6 +778,8 @@ class VC:
                     protect,
                     breath_safe,
                     breath_preserve,
+                    breath_denoise,
+                    breath_denoise_strength,
                 )
                 if opt and opt[0] is not None and opt[1] is not None:
                     try:
