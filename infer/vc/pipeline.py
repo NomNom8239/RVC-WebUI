@@ -82,6 +82,52 @@ def _match_audio_length(audio, length):
     return np.pad(audio, (0, length - len(audio)), mode="edge")
 
 
+def _denoise_breath_source(audio, strength):
+    """Light spectral denoise for the source branch used by breath-safe blending."""
+    strength = float(np.clip(strength, 0.0, 1.0))
+    audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if strength <= 0 or audio.size < 256:
+        return audio.copy()
+
+    n_fft = 1024 if audio.size >= 1024 else 512
+    if audio.size < n_fft:
+        n_fft = 256
+    hop_length = max(64, n_fft // 4)
+
+    spectrum = librosa.stft(
+        audio,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        win_length=n_fft,
+        center=True,
+    )
+    magnitude = np.abs(spectrum).astype(np.float32)
+    if magnitude.size == 0 or magnitude.shape[1] == 0:
+        return audio.copy()
+
+    # Estimate stationary/mechanical noise from the quietest 20% of frames.
+    frame_energy = np.mean(magnitude * magnitude, axis=0)
+    quiet_count = max(1, int(np.ceil(magnitude.shape[1] * 0.20)))
+    quiet_indices = np.argpartition(frame_energy, quiet_count - 1)[:quiet_count]
+    noise_profile = np.median(magnitude[:, quiet_indices], axis=1, keepdims=True)
+
+    eps = np.finfo(np.float32).eps
+    noise_power = (noise_profile * 1.5) ** 2
+    signal_power = magnitude * magnitude
+    wiener_gain = signal_power / (signal_power + noise_power + eps)
+
+    # strength=0 is bit-identical bypass; strength=1 applies the full soft gate.
+    gain = 1.0 - strength * (1.0 - wiener_gain)
+    cleaned_spectrum = spectrum * gain
+    cleaned = librosa.istft(
+        cleaned_spectrum,
+        hop_length=hop_length,
+        win_length=n_fft,
+        length=audio.size,
+    )
+    return np.nan_to_num(cleaned, copy=False).astype(np.float32)
+
+
 def _apply_breath_safe_blend(
     source_audio,
     converted_audio,
@@ -89,6 +135,8 @@ def _apply_breath_safe_blend(
     source_sr,
     target_sr,
     preserve,
+    denoise=False,
+    denoise_strength=0.35,
 ):
     preserve = float(np.clip(preserve, 0.0, 1.0))
     converted_audio = np.asarray(converted_audio, dtype=np.float32)
@@ -105,8 +153,15 @@ def _apply_breath_safe_blend(
     if breath_mask.size == 0 or not np.any(breath_mask > 0):
         return converted_audio
 
+    source_for_blend = np.asarray(source_audio, dtype=np.float32)
+    if denoise and float(denoise_strength) > 0:
+        source_for_blend = _denoise_breath_source(
+            source_for_blend,
+            denoise_strength,
+        )
+
     source_resampled = librosa.resample(
-        np.asarray(source_audio, dtype=np.float32),
+        source_for_blend,
         orig_sr=source_sr,
         target_sr=target_sr,
     )
@@ -384,6 +439,8 @@ class Pipeline(object):
         protect,
         breath_safe=False,
         breath_preserve=0.8,
+        breath_denoise=False,
+        breath_denoise_strength=0.35,
     ):
         source_audio = np.asarray(audio, dtype=np.float32).copy()
         if (
@@ -535,6 +592,8 @@ class Pipeline(object):
                 self.sr,
                 tgt_sr,
                 breath_preserve,
+                breath_denoise,
+                breath_denoise_strength,
             )
         elif breath_safe:
             reason = (
