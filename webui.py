@@ -1943,6 +1943,25 @@ with gr.Blocks(title="RVC WebUI", css=TRAINING_INFO_CSS) as app:
                                 step=0.01,
                                 interactive=True,
                             )
+                            breath_safe0 = gr.Checkbox(
+                                label=(
+                                    "Breath-safe推論 "
+                                    "（RMVPE専用・無声/息声を元音声側へ滑らかに戻す）"
+                                ),
+                                value=False,
+                                interactive=True,
+                            )
+                            breath_preserve0 = gr.Slider(
+                                minimum=0,
+                                maximum=1,
+                                label=(
+                                    "Breath preserve "
+                                    "（1.0ほど無声/息声を元音声から強く保持）"
+                                ),
+                                value=0.8,
+                                step=0.05,
+                                interactive=True,
+                            )
                             index_rate1 = gr.Slider(
                                 minimum=0,
                                 maximum=1,
@@ -1994,6 +2013,8 @@ with gr.Blocks(title="RVC WebUI", css=TRAINING_INFO_CSS) as app:
                                 resample_sr0,
                                 rms_mix_rate0,
                                 protect0,
+                                breath_safe0,
+                                breath_preserve0,
                             ],
                             [vc_output1, vc_output2, vc_output3],
                             api_name="infer_convert",
@@ -2059,6 +2080,25 @@ with gr.Blocks(title="RVC WebUI", css=TRAINING_INFO_CSS) as app:
                             step=0.01,
                             interactive=True,
                         )
+                        breath_safe1 = gr.Checkbox(
+                            label=(
+                                "Breath-safe推論 "
+                                "（RMVPE専用・無声/息声を元音声側へ滑らかに戻す）"
+                            ),
+                            value=False,
+                            interactive=True,
+                        )
+                        breath_preserve1 = gr.Slider(
+                            minimum=0,
+                            maximum=1,
+                            label=(
+                                "Breath preserve "
+                                "（1.0ほど無声/息声を元音声から強く保持）"
+                            ),
+                            value=0.8,
+                            step=0.05,
+                            interactive=True,
+                        )
                         index_rate2 = gr.Slider(
                             minimum=0,
                             maximum=1,
@@ -2105,6 +2145,8 @@ with gr.Blocks(title="RVC WebUI", css=TRAINING_INFO_CSS) as app:
                             rms_mix_rate1,
                             protect1,
                             format1,
+                            breath_safe1,
+                            breath_preserve1,
                         ],
                         [vc_output3],
                         api_name="infer_convert_batch",
