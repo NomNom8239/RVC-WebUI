@@ -1,4 +1,5 @@
 import os
+import sys
 import shutil
 import html
 import copy
@@ -111,8 +112,125 @@ def is_gradio_port_in_use_error(error, port):
     return str(error).startswith(f"Port {port} is in use.")
 
 
+GRADIO_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+
+
+def _stop_registered_child_processes():
+    """Best-effort stop for training and PyMSS subprocesses before process exit."""
+    lock = globals().get("TRAIN_TASK_LOCK")
+    processes = []
+    task_name = "RVC task"
+
+    if lock is not None:
+        acquired = False
+        try:
+            acquired = lock.acquire(timeout=1.0)
+            if acquired:
+                state = globals().get("TRAIN_TASK")
+                if state is not None:
+                    state["stop_requested"] = True
+                    task_name = state.get("name") or task_name
+                    processes = list(state.get("processes") or [])
+        except Exception:
+            logger.exception("Failed to inspect active training task during shutdown.")
+        finally:
+            if acquired:
+                lock.release()
+
+    for process in processes:
+        try:
+            kill_process_tree(process, task_name, logger)
+        except Exception:
+            logger.exception(
+                "Failed to terminate child process during shutdown (pid=%s).",
+                getattr(process, "pid", "?"),
+            )
+
+    try:
+        _stop_pymss_separation_core()
+    except Exception:
+        logger.exception("Failed to stop PyMSS worker during shutdown.")
+
+
+def _close_gradio_runtime(queued_app, timeout=GRADIO_SHUTDOWN_TIMEOUT_SECONDS):
+    """Close Gradio without allowing its server thread join to block forever."""
+    queue = getattr(queued_app, "_queue", None)
+    if queue is not None:
+        try:
+            queue.close()
+        except Exception:
+            logger.exception("Failed to close Gradio queue.")
+
+    server = getattr(queued_app, "server", None)
+    if server is None:
+        queued_app.is_running = False
+        return True
+
+    finished = threading.Event()
+
+    def close_server():
+        try:
+            server.close()
+        except Exception:
+            logger.exception("Failed while closing Gradio server.")
+        finally:
+            finished.set()
+
+    close_thread = threading.Thread(
+        target=close_server,
+        name="rvc-gradio-shutdown",
+        daemon=True,
+    )
+    close_thread.start()
+    closed = finished.wait(timeout)
+    if not closed:
+        try:
+            server.should_exit = True
+        except Exception:
+            pass
+        logger.warning(
+            "Gradio server did not finish shutdown within %.1fs; forcing process exit.",
+            timeout,
+        )
+
+    queued_app.is_running = False
+    return closed
+
+
+def _shutdown_webui(queued_app):
+    """Stop owned children first, then close Gradio with a bounded wait."""
+    _stop_registered_child_processes()
+    closed_cleanly = _close_gradio_runtime(queued_app)
+    if closed_cleanly:
+        logger.info("RVC WebUI shutdown complete.")
+    return closed_cleanly
+
+
+def _force_windows_exit(exit_code=0):
+    """Avoid Python 3.12 waiting forever for leftover non-daemon library threads."""
+    if os.name != "nt":
+        return
+
+    live_threads = [
+        thread.name
+        for thread in threading.enumerate()
+        if thread is not threading.main_thread() and thread.is_alive()
+    ]
+    if live_threads:
+        logger.warning(
+            "Forcing Windows process exit; remaining threads: %s",
+            ", ".join(live_threads),
+        )
+
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    finally:
+        os._exit(exit_code)
+
+
 def launch_webui_with_port_fallback(app, config):
-    """Launch Gradio with explicit shutdown so Ctrl+C does not leave queue threads."""
+    """Launch Gradio and guarantee Ctrl+C terminates the Windows process."""
     next_port = config.listen_port
     queued_app = app.queue(concurrency_count=511, max_size=1022)
 
@@ -150,17 +268,21 @@ def launch_webui_with_port_fallback(app, config):
             )
             next_port = config.listen_port + 1
 
+    interrupted = False
     try:
         while True:
             time.sleep(0.2)
     except KeyboardInterrupt:
+        interrupted = True
         print(
-            "Keyboard interruption in main thread... closing server and queue.",
+            "Keyboard interruption in main thread... closing RVC WebUI.",
             flush=True,
         )
     finally:
-        queued_app.close()
-        logger.info("RVC WebUI shutdown complete.")
+        _shutdown_webui(queued_app)
+
+    if interrupted:
+        _force_windows_exit(0)
 
     return config.listen_port
 
