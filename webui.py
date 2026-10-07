@@ -153,7 +153,7 @@ def _stop_registered_child_processes():
 
 
 def _close_gradio_runtime(queued_app, timeout=GRADIO_SHUTDOWN_TIMEOUT_SECONDS):
-    """Close Gradio without allowing its server thread join to block forever."""
+    """Stop Gradio with a bounded graceful wait, then emulate a second Ctrl+C."""
     queue = getattr(queued_app, "_queue", None)
     if queue is not None:
         try:
@@ -166,30 +166,32 @@ def _close_gradio_runtime(queued_app, timeout=GRADIO_SHUTDOWN_TIMEOUT_SECONDS):
         queued_app.is_running = False
         return True
 
-    finished = threading.Event()
+    server_thread = getattr(server, "thread", None)
+    try:
+        server.should_exit = True
+    except Exception:
+        logger.exception("Failed to request Gradio server shutdown.")
 
-    def close_server():
+    # Uvicorn 0.20 can wait indefinitely for an open Gradio websocket.
+    # Give it a short graceful window, then set force_exit just like a
+    # second Ctrl+C so active websocket/background tasks cannot pin shutdown.
+    graceful_wait = min(1.0, float(timeout))
+    if server_thread is not None and server_thread.is_alive():
+        server_thread.join(timeout=graceful_wait)
+
+    if server_thread is not None and server_thread.is_alive():
         try:
-            server.close()
+            server.force_exit = True
         except Exception:
-            logger.exception("Failed while closing Gradio server.")
-        finally:
-            finished.set()
+            logger.exception("Failed to request forced Uvicorn shutdown.")
+        remaining = max(0.0, float(timeout) - graceful_wait)
+        if remaining:
+            server_thread.join(timeout=remaining)
 
-    close_thread = threading.Thread(
-        target=close_server,
-        name="rvc-gradio-shutdown",
-        daemon=True,
-    )
-    close_thread.start()
-    closed = finished.wait(timeout)
+    closed = server_thread is None or not server_thread.is_alive()
     if not closed:
-        try:
-            server.should_exit = True
-        except Exception:
-            pass
         logger.warning(
-            "Gradio server did not finish shutdown within %.1fs; forcing process exit.",
+            "Gradio server thread is still alive after %.1fs; Windows process fallback will terminate it.",
             timeout,
         )
 
@@ -207,21 +209,31 @@ def _shutdown_webui(queued_app):
 
 
 def _force_windows_exit(exit_code=0):
-    """Avoid Python 3.12 waiting forever for leftover non-daemon library threads."""
+    """Use os._exit only when Windows library worker threads refuse to stop."""
     if os.name != "nt":
         return
 
-    live_threads = [
-        thread.name
-        for thread in threading.enumerate()
-        if thread is not threading.main_thread() and thread.is_alive()
-    ]
-    if live_threads:
-        logger.warning(
-            "Forcing Windows process exit; remaining threads: %s",
-            ", ".join(live_threads),
-        )
+    deadline = time.monotonic() + 2.0
+    remaining = []
+    while True:
+        remaining = [
+            thread
+            for thread in threading.enumerate()
+            if thread is not threading.main_thread()
+            and thread.is_alive()
+            and not thread.daemon
+        ]
+        if not remaining or time.monotonic() >= deadline:
+            break
+        time.sleep(0.1)
 
+    if not remaining:
+        return
+
+    logger.warning(
+        "Forcing Windows process exit; remaining non-daemon threads: %s",
+        ", ".join(thread.name for thread in remaining),
+    )
     try:
         sys.stdout.flush()
         sys.stderr.flush()
