@@ -112,9 +112,10 @@ def is_gradio_port_in_use_error(error, port):
 
 
 def launch_webui_with_port_fallback(app, config):
-    """Launch Gradio, increasing the requested port until startup succeeds."""
+    """Launch Gradio with explicit shutdown so Ctrl+C does not leave queue threads."""
     next_port = config.listen_port
     queued_app = app.queue(concurrency_count=511, max_size=1022)
+
     while True:
         config.listen_port = find_available_port(next_port)
         if config.listen_port != next_port:
@@ -124,13 +125,18 @@ def launch_webui_with_port_fallback(app, config):
                 config.listen_port,
             )
         try:
+            # Gradio 3.14's internal block_thread() handles Ctrl+C by closing only
+            # the HTTP server.  Its queue is left open, which can keep the Python
+            # process alive on Windows.  Keep the main-thread wait here instead so
+            # shutdown always goes through Blocks.close().
             queued_app.launch(
                 server_name="0.0.0.0",
                 inbrowser=not config.noautoopen,
                 server_port=config.listen_port,
                 quiet=True,
+                prevent_thread_lock=True,
             )
-            return config.listen_port
+            break
         except OSError as error:
             if not is_gradio_port_in_use_error(error, config.listen_port):
                 raise
@@ -143,6 +149,20 @@ def launch_webui_with_port_fallback(app, config):
                 config.listen_port,
             )
             next_port = config.listen_port + 1
+
+    try:
+        while True:
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        print(
+            "Keyboard interruption in main thread... closing server and queue.",
+            flush=True,
+        )
+    finally:
+        queued_app.close()
+        logger.info("RVC WebUI shutdown complete.")
+
+    return config.listen_port
 
 runtime_dirs = (
     os.path.join(now_dir, "logs"),
