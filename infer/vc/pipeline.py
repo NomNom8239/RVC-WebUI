@@ -54,6 +54,10 @@ def _smooth_breath_mask(voiced_mask, expand_ms, fade_ms, frame_ms):
     breath_mask = (voiced_mask < 0.5).astype(np.float32)
 
     expand_frames = max(0, int(round(expand_ms / frame_ms)))
+    expand_frames = min(
+        expand_frames,
+        max(0, (breath_mask.size - 1) // 2),
+    )
     if expand_frames > 0:
         kernel = np.ones(expand_frames * 2 + 1, dtype=np.float32)
         breath_mask = (
@@ -532,10 +536,15 @@ class Pipeline(object):
                 tgt_sr,
                 breath_preserve,
             )
-        elif breath_safe and f0_method != "rmvpe":
+        elif breath_safe:
+            reason = (
+                "F0 guidance is disabled"
+                if if_f0 != 1
+                else "F0 method is %s" % f0_method
+            )
             logger.warning(
-                "Breath-safe inference is RMVPE-only; skipping for %s.",
-                f0_method,
+                "Breath-safe inference skipped: %s (RMVPE + F0 model required).",
+                reason,
             )
 
         if tgt_sr != resample_sr >= 16000:
