@@ -42,6 +42,104 @@ def change_rms(data1, sr1, data2, sr2, rate):  # 1是输入音频，2是输出�
     return data2
 
 
+BREATH_SAFE_EXPAND_MS = 40.0
+BREATH_SAFE_FADE_MS = 80.0
+
+
+def _smooth_breath_mask(voiced_mask, expand_ms, fade_ms, frame_ms):
+    voiced_mask = np.asarray(voiced_mask, dtype=np.float32).reshape(-1)
+    if voiced_mask.size == 0:
+        return voiced_mask
+
+    breath_mask = (voiced_mask < 0.5).astype(np.float32)
+
+    expand_frames = max(0, int(round(expand_ms / frame_ms)))
+    if expand_frames > 0:
+        kernel = np.ones(expand_frames * 2 + 1, dtype=np.float32)
+        breath_mask = (
+            np.convolve(breath_mask, kernel, mode="same") > 0
+        ).astype(np.float32)
+
+    fade_frames = max(1, int(round(fade_ms / frame_ms)))
+    fade_frames = min(fade_frames, max(1, breath_mask.size))
+    if fade_frames > 1:
+        kernel = np.ones(fade_frames, dtype=np.float32) / float(fade_frames)
+        breath_mask = np.convolve(breath_mask, kernel, mode="same")
+
+    return np.clip(breath_mask, 0.0, 1.0).astype(np.float32)
+
+
+def _match_audio_length(audio, length):
+    audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if len(audio) >= length:
+        return audio[:length]
+    if len(audio) == 0:
+        return np.zeros(length, dtype=np.float32)
+    return np.pad(audio, (0, length - len(audio)), mode="edge")
+
+
+def _apply_breath_safe_blend(
+    source_audio,
+    converted_audio,
+    voiced_mask,
+    source_sr,
+    target_sr,
+    preserve,
+):
+    preserve = float(np.clip(preserve, 0.0, 1.0))
+    converted_audio = np.asarray(converted_audio, dtype=np.float32)
+    if preserve <= 0 or converted_audio.size == 0:
+        return converted_audio
+
+    frame_ms = 1000.0 * 160.0 / float(source_sr)
+    breath_mask = _smooth_breath_mask(
+        voiced_mask,
+        BREATH_SAFE_EXPAND_MS,
+        BREATH_SAFE_FADE_MS,
+        frame_ms,
+    )
+    if breath_mask.size == 0 or not np.any(breath_mask > 0):
+        return converted_audio
+
+    source_resampled = librosa.resample(
+        np.asarray(source_audio, dtype=np.float32),
+        orig_sr=source_sr,
+        target_sr=target_sr,
+    )
+    source_resampled = _match_audio_length(source_resampled, len(converted_audio))
+
+    if breath_mask.size == 1:
+        sample_mask = np.full(
+            len(converted_audio),
+            float(breath_mask[0]),
+            dtype=np.float32,
+        )
+    else:
+        frame_positions = np.linspace(
+            0.0,
+            1.0,
+            num=breath_mask.size,
+            endpoint=True,
+        )
+        sample_positions = np.linspace(
+            0.0,
+            1.0,
+            num=len(converted_audio),
+            endpoint=True,
+        )
+        sample_mask = np.interp(
+            sample_positions,
+            frame_positions,
+            breath_mask,
+        ).astype(np.float32)
+
+    blend = np.clip(sample_mask * preserve, 0.0, 1.0)
+    return (
+        converted_audio * (1.0 - blend)
+        + source_resampled * blend
+    ).astype(np.float32)
+
+
 class Pipeline(object):
     def __init__(self, tgt_sr, config):
         self.x_pad, self.x_query, self.x_center, self.x_max, self.is_half = (
@@ -122,11 +220,22 @@ class Pipeline(object):
                 threshold=0.006,
             ).squeeze().detach().cpu().numpy()
 
-        try:
-            uv = f0 == 0
-            f0[uv] = np.interp(np.where(uv)[0], np.where(~uv)[0], f0[~uv])
-        except Exception:
-            traceback.print_exc()
+        f0 = np.asarray(f0, dtype=np.float32).reshape(-1)
+        if len(f0) < p_len:
+            f0 = np.pad(f0, (0, p_len - len(f0)), mode="constant")
+        elif len(f0) > p_len:
+            f0 = f0[:p_len]
+
+        voiced_mask = (f0 > 0).astype(np.float32)
+        uv = voiced_mask < 0.5
+        voiced = ~uv
+        if np.any(voiced):
+            f0[uv] = np.interp(
+                np.flatnonzero(uv),
+                np.flatnonzero(voiced),
+                f0[voiced],
+            )
+
         f0 *= pow(2, f0_up_key / 12)
         f0bak = f0.copy()
         f0_mel = 1127 * np.log(1 + f0 / 700)
@@ -136,7 +245,7 @@ class Pipeline(object):
         f0_mel[f0_mel <= 1] = 1
         f0_mel[f0_mel > 255] = 255
         f0_coarse = np.rint(f0_mel).astype(np.int32)
-        return f0_coarse, f0bak  # 1-0
+        return f0_coarse, f0bak, voiced_mask
 
     def vc(
         self,
@@ -146,6 +255,7 @@ class Pipeline(object):
         audio0,
         pitch,
         pitchf,
+        voiced_mask,
         times,
         index,
         index_vectors,
@@ -172,7 +282,7 @@ class Pipeline(object):
                 version,
                 padding_mask=padding_mask,
             )
-        if protect < 0.5 and pitch is not None and pitchf is not None:
+        if protect < 0.5 and voiced_mask is not None:
             feats0 = feats.clone()
         if (
             not isinstance(index, type(None))
@@ -196,7 +306,7 @@ class Pipeline(object):
             )
 
         feats = F.interpolate(feats.permute(0, 2, 1), scale_factor=2).permute(0, 2, 1)
-        if protect < 0.5 and pitch is not None and pitchf is not None:
+        if protect < 0.5 and voiced_mask is not None:
             feats0 = F.interpolate(feats0.permute(0, 2, 1), scale_factor=2).permute(
                 0, 2, 1
             )
@@ -207,13 +317,15 @@ class Pipeline(object):
             if pitch is not None and pitchf is not None:
                 pitch = pitch[:, :p_len]
                 pitchf = pitchf[:, :p_len]
+            if voiced_mask is not None:
+                voiced_mask = voiced_mask[:, :p_len]
 
-        if protect < 0.5 and pitch is not None and pitchf is not None:
-            pitchff = pitchf.clone()
-            pitchff[pitchf > 0] = 1
-            pitchff[pitchf < 1] = protect
-            pitchff = pitchff.unsqueeze(-1)
-            feats = feats * pitchff + feats0 * (1 - pitchff)
+        if protect < 0.5 and voiced_mask is not None:
+            protect_mask = voiced_mask.clone()
+            protect_mask[voiced_mask >= 0.5] = 1.0
+            protect_mask[voiced_mask < 0.5] = protect
+            protect_mask = protect_mask.unsqueeze(-1)
+            feats = feats * protect_mask + feats0 * (1 - protect_mask)
             feats = feats.to(feats0.dtype)
         p_len = torch.tensor([p_len], device=self.device).long()
         with torch.no_grad():
@@ -269,7 +381,10 @@ class Pipeline(object):
         rms_mix_rate,
         version,
         protect,
+        breath_safe=False,
+        breath_preserve=0.8,
     ):
+        source_audio = np.asarray(audio, dtype=np.float32).copy()
         if (
             file_index != ""
             and os.path.exists(file_index)
@@ -307,18 +422,25 @@ class Pipeline(object):
         p_len = audio_pad.shape[0] // self.window
         sid = torch.tensor(sid, device=self.device).unsqueeze(0).long()
         pitch, pitchf = None, None
+        voiced_mask_np = None
+        voiced_mask = None
         if if_f0 == 1:
-            pitch, pitchf = self.get_f0(
+            pitch, pitchf, voiced_mask_np = self.get_f0(
                 audio_pad,
                 p_len,
                 f0_up_key,
                 f0_method,
             )
             pitch = pitch[:p_len]
-            pitchf = pitchf[:p_len]
-            pitchf = pitchf.astype(np.float32)
+            pitchf = pitchf[:p_len].astype(np.float32)
+            voiced_mask_np = voiced_mask_np[:p_len].astype(np.float32)
             pitch = torch.tensor(pitch, device=self.device).unsqueeze(0).long()
             pitchf = torch.tensor(pitchf, device=self.device).unsqueeze(0).float()
+            voiced_mask = (
+                torch.tensor(voiced_mask_np, device=self.device)
+                .unsqueeze(0)
+                .float()
+            )
         t2 = ttime()
         times[1] += t2 - t1
         for t in opt_ts:
@@ -332,6 +454,9 @@ class Pipeline(object):
                         audio_pad[s : t + self.t_pad2 + self.window],
                         pitch[:, s // self.window : (t + self.t_pad2) // self.window],
                         pitchf[:, s // self.window : (t + self.t_pad2) // self.window],
+                        voiced_mask[
+                            :, s // self.window : (t + self.t_pad2) // self.window
+                        ],
                         times,
                         index,
                         index_vectors,
@@ -347,6 +472,7 @@ class Pipeline(object):
                         net_g,
                         sid,
                         audio_pad[s : t + self.t_pad2 + self.window],
+                        None,
                         None,
                         None,
                         times,
@@ -367,6 +493,11 @@ class Pipeline(object):
                     audio_pad[t:],
                     pitch[:, t // self.window :] if t is not None else pitch,
                     pitchf[:, t // self.window :] if t is not None else pitchf,
+                    (
+                        voiced_mask[:, t // self.window :]
+                        if t is not None
+                        else voiced_mask
+                    ),
                     times,
                     index,
                     index_vectors,
@@ -384,6 +515,7 @@ class Pipeline(object):
                     audio_pad[t:],
                     None,
                     None,
+                    None,
                     times,
                     index,
                     index_vectors,
@@ -395,6 +527,36 @@ class Pipeline(object):
         audio_opt = np.concatenate(audio_opt)
         if rms_mix_rate != 1:
             audio_opt = change_rms(audio, 16000, audio_opt, tgt_sr, rms_mix_rate)
+
+        if (
+            breath_safe
+            and if_f0 == 1
+            and f0_method == "rmvpe"
+            and voiced_mask_np is not None
+            and float(breath_preserve) > 0
+        ):
+            pad_frames = self.t_pad // self.window
+            source_frames = max(
+                1,
+                int(np.ceil(len(source_audio) / float(self.window))),
+            )
+            source_voiced_mask = voiced_mask_np[
+                pad_frames : pad_frames + source_frames
+            ]
+            audio_opt = _apply_breath_safe_blend(
+                source_audio,
+                audio_opt,
+                source_voiced_mask,
+                self.sr,
+                tgt_sr,
+                breath_preserve,
+            )
+        elif breath_safe and f0_method != "rmvpe":
+            logger.warning(
+                "Breath-safe inference is RMVPE-only; skipping for %s.",
+                f0_method,
+            )
+
         if tgt_sr != resample_sr >= 16000:
             audio_opt = librosa.resample(
                 audio_opt, orig_sr=tgt_sr, target_sr=resample_sr
@@ -404,7 +566,7 @@ class Pipeline(object):
         if audio_max > 1:
             max_int16 /= audio_max
         audio_opt = (audio_opt * max_int16).astype(np.int16)
-        del pitch, pitchf, sid
+        del pitch, pitchf, voiced_mask, sid
         if torch.cuda.is_available() and not cuda_graph_enabled(self.device):
             torch.cuda.empty_cache()
         return audio_opt
