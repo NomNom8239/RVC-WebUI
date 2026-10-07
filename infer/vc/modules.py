@@ -253,6 +253,25 @@ class VC:
         self.if_f0 = self.cpt.get("f0", 1)
         self.version = self.cpt.get("version", "v1")
 
+        to_return_protect0 = {
+            "visible": self.if_f0 != 0,
+            "value": (
+                to_return_protect[0]
+                if self.if_f0 != 0 and to_return_protect
+                else 0.5
+            ),
+            "__type__": "update",
+        }
+        to_return_protect1 = {
+            "visible": self.if_f0 != 0,
+            "value": (
+                to_return_protect[1]
+                if self.if_f0 != 0 and to_return_protect
+                else 0.33
+            ),
+            "__type__": "update",
+        }
+
         synthesizer_class = {
             ("v1", 1): SynthesizerTrnMs256NSFsid,
             ("v1", 0): SynthesizerTrnMs256NSFsid_nono,
@@ -323,6 +342,8 @@ class VC:
         resample_sr,
         rms_mix_rate,
         protect,
+        breath_safe=False,
+        breath_preserve=0.8,
     ):
         audio = np.asarray(audio, dtype=np.float32)
         if audio.size == 0:
@@ -353,6 +374,8 @@ class VC:
             rms_mix_rate,
             self.version,
             protect,
+            breath_safe,
+            breath_preserve,
         )
         tgt_sr = (
             resample_sr
@@ -379,6 +402,8 @@ class VC:
         resample_sr,
         rms_mix_rate,
         protect,
+        breath_safe=False,
+        breath_preserve=0.8,
     ):
         if input_audio_path is None:
             return inference_status("单次推理", "等待输入", i18n("请上传音频文件")), None
@@ -394,6 +419,8 @@ class VC:
                 resample_sr,
                 rms_mix_rate,
                 protect,
+                breath_safe,
+                breath_preserve,
             )
             return (
                 inference_status(
@@ -428,6 +455,8 @@ class VC:
         resample_sr,
         rms_mix_rate,
         protect,
+        breath_safe=False,
+        breath_preserve=0.8,
         duration_seconds=None,
     ):
         if input_audio_path is None:
@@ -480,6 +509,8 @@ class VC:
                     resample_sr,
                     rms_mix_rate,
                     protect,
+                    breath_safe,
+                    breath_preserve,
                 )
                 del audio
 
@@ -595,6 +626,8 @@ class VC:
         resample_sr,
         rms_mix_rate,
         protect,
+        breath_safe=False,
+        breath_preserve=0.8,
     ):
         if input_audio_path is None:
             return inference_status("单次推理", "等待输入", i18n("请上传音频文件")), None
@@ -616,6 +649,8 @@ class VC:
                 resample_sr,
                 rms_mix_rate,
                 protect,
+                breath_safe,
+                breath_preserve,
             )
 
         if duration_seconds <= LONG_AUDIO_THRESHOLD_SECONDS:
@@ -629,6 +664,8 @@ class VC:
                 resample_sr,
                 rms_mix_rate,
                 protect,
+                breath_safe,
+                breath_preserve,
             )
 
         return self.vc_single_chunked(
@@ -641,6 +678,8 @@ class VC:
             resample_sr,
             rms_mix_rate,
             protect,
+            breath_safe,
+            breath_preserve,
             duration_seconds=duration_seconds,
         )
 
@@ -658,6 +697,8 @@ class VC:
         rms_mix_rate,
         protect,
         format1,
+        breath_safe=False,
+        breath_preserve=0.8,
     ):
         try:
             dir_path = (
@@ -713,6 +754,8 @@ class VC:
                     resample_sr,
                     rms_mix_rate,
                     protect,
+                    breath_safe,
+                    breath_preserve,
                 )
                 if opt and opt[0] is not None and opt[1] is not None:
                     try:
